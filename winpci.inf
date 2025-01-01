@@ -1,0 +1,96 @@
+;
+; winpci.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=PCIeUserSpaceDriver ; TODO: edit Class
+ClassGuid={78A1C341-4539-11d3-B88D-00C04FAD5171} ; TODO: edit ClassGuid
+Provider=%ManufacturerName%
+CatalogFile=winpci.cat
+DriverVer= ; TODO: set DriverVer in stampinf property pages
+PnpLockDown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+winpci_Device_CoInstaller_CopyFiles = 11
+
+; ================= Class section =====================
+
+[ClassInstall32]
+Addreg=SampleClassReg
+
+[SampleClassReg]
+HKR,,,0,%ClassName%
+HKR,,Icon,,-5
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+winpci.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1 ; make sure the number matches with SourceDisksNames
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%winpci.DeviceDesc%=winpci_Device, PCI\CC_010802 ; TODO: edit hw-id
+
+[winpci_Device.NT]
+CopyFiles=Drivers_Dir
+
+[winpci_Device.NT.HW]
+AddReg = winpci_Inst_HW_AddReg
+
+[Drivers_Dir]
+winpci.sys
+
+[winpci_Inst_HW_AddReg]
+HKR,"Interrupt Management",,0x00000010
+HKR,"Interrupt Management\MessageSignaledInterruptProperties",,0x00000010
+HKR,"Interrupt Management\MessageSignaledInterruptProperties","MSISupported",0x00010001,1
+HKR, Interrupt Management\MessageSignaledInterruptProperties, MessageNumberLimit, 0x00010001,   9
+
+;-------------- Service installation
+[winpci_Device.NT.Services]
+AddService = winpci,%SPSVCINST_ASSOCSERVICE%, winpci_Service_Inst
+
+; -------------- winpci driver install sections
+[winpci_Service_Inst]
+DisplayName    = %winpci.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\winpci.sys
+
+;
+;--- winpci_Device Coinstaller installation ------
+;
+
+[winpci_Device.NT.CoInstallers]
+AddReg=winpci_Device_CoInstaller_AddReg
+CopyFiles=winpci_Device_CoInstaller_CopyFiles
+
+[winpci_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[winpci_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[winpci_Device.NT.Wdf]
+KmdfService =  winpci, winpci_wdfsect
+[winpci_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+ClassName="WinPCI" ; TODO: edit ClassName
+DiskName = "winpci Installation Disk"
+winpci.DeviceDesc = "winpci Device"
+winpci.SVCDESC = "winpci Service"
