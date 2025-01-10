@@ -7,14 +7,17 @@
 #include "SpinLock.h"
 
 const int MAX_EVENT_SZ = 16;
-#define	EVENTNAMEMAXLEN	100
+const int  EVENTNAMEMAXLEN = 100;
 
 #define arraysize( p ) ( sizeof( p ) / sizeof( ( p )[0] ) )
 
 #define DEVICE_NAME					( L"\\Device\\WINPCI" )
 #define DEVICE_SYMLINKNAME	( L"\\DosDevices\\WINPCI" )
 
-LONG gucDeviceCounter;
+const int MAX_DEVICE_COUNT = 100;
+bool gbDeviceNumber[MAX_DEVICE_COUNT] = { FALSE };
+FastMutex	gDeviceCountLocker;
+//LONG gucDeviceCounter;
 
 //Mapped memory information list
 typedef struct tagMAPINFO
@@ -30,58 +33,44 @@ typedef struct _MEMORY {
 	LIST_ENTRY					ListEntry;
 	ULONG							Length;
 	PHYSICAL_ADDRESS	   dmaAddr;
-	_DMA_ADAPTER* dmaAdapter;
 	PVOID								pvk;
 	PVOID								pvu;
 	PMDL								pMdl;
 }MEMORY, * PMEMORY;
 
-
 typedef struct _DEVICE_EXTENSION
 {
-	PDEVICE_OBJECT		fdo;
-	PDEVICE_OBJECT		PhyDevice;
-	PDEVICE_OBJECT		NextStackDevice;
-	UNICODE_STRING	ustrDeviceName;
-	UNICODE_STRING	ustrSymLinkName;
+	PDEVICE_OBJECT		   fdo;
+	PDEVICE_OBJECT		   PhyDevice;
+	PDEVICE_OBJECT		   NextStackDevice;
+	UNICODE_STRING	   ustrDeviceName;
+	UNICODE_STRING	   ustrSymLinkName;
 	struct _KINTERRUPT* InterruptObject;
-
-	BOOLEAN					bInterruptEnable;
-
-	LIST_ENTRY				winpci_dma_linkListHead;
-	FastMutex					winpci_dma_locker;
-
-	LIST_ENTRY				winpci_mmap_linkListHead;
-	FastMutex					winpci_mmap_locker;
-
-	HANDLE						eventHandle[MAX_EVENT_SZ];
-	PKEVENT					pEvent[MAX_EVENT_SZ];
-
-	UINT8							DeviceCounter;
-
-	LONG							InterruptCount;
-
-	ULONG						IsrType;
-
-	ULONG						MessageId;
-
-	ULONG						bus;
-	USHORT						dev;
-	USHORT						func;
-
-
+	BOOLEAN					    bInterruptEnable;
+	_DMA_ADAPTER*       dmaAdapter;
+	ULONG						    NumOfMappedRegister;
+	LIST_ENTRY				    winpci_dma_linkListHead;
+	FastMutex					    winpci_dma_locker;
+	LIST_ENTRY				    winpci_mmap_linkListHead;
+	FastMutex					    winpci_mmap_locker;
+	HANDLE						    eventHandle[MAX_EVENT_SZ];
+	PKEVENT					    pEvent[MAX_EVENT_SZ];
+	UINT8							    DeviceCounter;
+	LONG							    InterruptCount;
+	ULONG						    IsrType;
+	ULONG						    MessageId;
+	ULONG						    bus;
+	USHORT						    dev;
+	USHORT						    func;
 } DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
 void WINPCIDelay(long long millsecond);
-
 NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 NTSTATUS WINPCIPnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
 NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
 NTSTATUS WINPCIDispatchRoutine(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
-
 NTSTATUS WINPCICleanUp(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
 NTSTATUS WINPCIPower(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
-
 void WINPCIUnload(IN PDRIVER_OBJECT DriverObject);
 
 NTSTATUS ReadWriteConfigSpace(IN PDEVICE_OBJECT DeviceObject, IN ULONG ReadOrWrite, // 0 for read 1 for write
@@ -104,6 +93,7 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING pRegist
 	pDriverObject->MajorFunction[IRP_MJ_POWER] = WINPCIPower;
 	pDriverObject->DriverUnload = WINPCIUnload;
 
+	gDeviceCountLocker.Init();
 	//KeInitializeSpinLock(&interrupt_lock);
 
 	return STATUS_SUCCESS;
@@ -117,9 +107,7 @@ MSI_ISR(
 )
 {
 	UNREFERENCED_PARAMETER(Interrupt);
-
 	//DbgPrint("Interrupt Occured: %d\n", MessageId);
-
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)ServiceContext;
 
 	p->MessageId = MessageId;
@@ -138,11 +126,9 @@ FdoInterruptCallback(
 	//UNREFERENCED_PARAMETER(Context);
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)Context;
 
-
 	DbgPrint("interrupt\n");
 	return TRUE;
 }
-
 
 VOID DPC(
 	IN PKDPC Dpc,
@@ -177,7 +163,6 @@ VOID DPC(
 	return;
 }
 
-
 NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject)
 {
 	NTSTATUS			status;
@@ -188,20 +173,24 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 
 	DbgPrint("WINPCIAddDevice\n");
 
-	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
-		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
-	}
-	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
-	}
-
-
 	//DECLARE_UNICODE_STRING_SIZE(devName, 64);
 	//DECLARE_UNICODE_STRING_SIZE(symLinkName, 64);
 
 	wchar_t  devNameReal[64] = { 0 };
 	wchar_t  symLinkNameReal[64] = { 0 };
-	swprintf(devNameReal, L"%s%d", DEVICE_NAME, gucDeviceCounter);
+
+	int devCounter = 0;
+	gDeviceCountLocker.Lock();
+	for (int i = 0; i < MAX_DEVICE_COUNT;++i) {
+		if (gbDeviceNumber[i] == FALSE) {
+			devCounter = i;
+			gbDeviceNumber[i] = TRUE;
+			break;
+		}
+	}
+	gDeviceCountLocker.UnLock();
+
+	swprintf(devNameReal, L"%s%d", DEVICE_NAME, devCounter);
 	DbgPrint("%ls\n", devNameReal);
 	RtlInitUnicodeString(&devName, devNameReal);
 	//RtlUnicodeStringPrintf(&devName, L"\\Device\\WINPCI%d", gucDeviceCounter);
@@ -216,7 +205,7 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	pdx = (PDEVICE_EXTENSION)fdo->DeviceExtension;
 	pdx->fdo = fdo;
 	pdx->PhyDevice = PhysicalDeviceObject;
-	pdx->DeviceCounter = gucDeviceCounter;
+	pdx->DeviceCounter = devCounter;
 
 	for(int i=0; i< MAX_EVENT_SZ; ++i) pdx->eventHandle[i] = nullptr;
 
@@ -237,14 +226,9 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 		return status;
 	}
 
-
-	//RtlUnicodeStringPrintf(&symLinkName, L"\\DosDevices\\WINPCI_%d", gucDeviceCounter);
-
-	swprintf(symLinkNameReal, L"%s%d", DEVICE_SYMLINKNAME, gucDeviceCounter);
+	swprintf(symLinkNameReal, L"%s%d", DEVICE_SYMLINKNAME, devCounter);
 	DbgPrint("%ls\n", symLinkNameReal);
 	RtlInitUnicodeString(&symLinkName, symLinkNameReal);
-	//RtlInitUnicodeString(&symLinkName, DEVICE_SYMLINKNAME);
-
 
 	pdx->ustrDeviceName = devName;
 	pdx->ustrSymLinkName = symLinkName;
@@ -270,7 +254,7 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	DbgPrint("Success DriverEntry\n");
 
 	//gucDeviceCounter++;
-	InterlockedIncrement(&gucDeviceCounter);
+	//InterlockedIncrement(&gucDeviceCounter);
 	return STATUS_SUCCESS;
 }
 
@@ -288,7 +272,6 @@ NTSTATUS OnRequestComplete(PDEVICE_OBJECT junk, PIRP Irp, PKEVENT pev)
 	KeSetEvent(pev, 0, FALSE);
 	return STATUS_MORE_PROCESSING_REQUIRED;
 }
-
 
 NTSTATUS ForwardAndWait(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
@@ -473,27 +456,19 @@ BOOLEAN OnInterrupt(PKINTERRUPT InterruptObject, PDEVICE_EXTENSION pdx)
 
 NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
-	NTSTATUS						status;
-	PIO_STACK_LOCATION				stack;
+	NTSTATUS	status;
+	PIO_STACK_LOCATION	stack;
 	PCM_PARTIAL_RESOURCE_LIST		translated;
 	PCM_FULL_RESOURCE_DESCRIPTOR	pfrd;
 	IO_CONNECT_INTERRUPT_PARAMETERS     Connect;
-	PIO_INTERRUPT_MESSAGE_INFO  p;
-	PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
-	UINT16     command_reg;
+	PIO_INTERRUPT_MESSAGE_INFO		p;
+	PIO_INTERRUPT_MESSAGE_INFO_ENTRY	pp;
+	UINT16  command_reg;
 	int i;
 
 	DbgPrint("HandleStartDevice\n");
 
 	status = ForwardAndWait(pdx, Irp);
-
-	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
-		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
-	}
-	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
-	}
-
 
 	if (!NT_SUCCESS(status))
 	{
@@ -504,7 +479,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	stack = IoGetCurrentIrpStackLocation(Irp);
 
-
 	if (stack->Parameters.StartDevice.AllocatedResourcesTranslated)
 	{
 		translated = &stack->Parameters.StartDevice.AllocatedResourcesTranslated->List[0].PartialResourceList;
@@ -512,11 +486,19 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	}
 	else
 	{
-		translated = NULL;
+		translated = nullptr;
 	}
 
 	// Show resource from PNP Manager
 	// ShowResources(translated, pdx);
+
+	if (translated == nullptr) {
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+	PCM_PARTIAL_RESOURCE_DESCRIPTOR resource = translated->PartialDescriptors;
 
 	ULONG  length;
 	ULONG propertyAddress;
@@ -544,6 +526,32 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		pdx->dev = (USHORT)(((propertyAddress) >> 16) & 0x0000FFFF);
 		DbgPrint("DeviceNumber:%x\n", pdx->dev);
 		DbgPrint("FunctionNumber:%x\n", pdx->func);
+
+	}
+
+	/* setting DMA adapter */
+	DEVICE_DESCRIPTION DeviceDescription;
+	RtlZeroMemory(&DeviceDescription, sizeof(DEVICE_DESCRIPTION));
+
+	DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION3;
+	DeviceDescription.Master = TRUE;
+	DeviceDescription.ScatterGather = TRUE;
+	DeviceDescription.IgnoreCount = TRUE;
+	DeviceDescription.DmaChannel = resource->u.Dma.Channel;
+	DeviceDescription.Dma32BitAddresses = FALSE;
+	DeviceDescription.Dma64BitAddresses = FALSE;
+	DeviceDescription.InterfaceType = PCIBus;
+	DeviceDescription.MaximumLength =  0x10000000;
+	DeviceDescription.DmaAddressWidth = 64;
+
+	if(pdx->dmaAdapter == nullptr)
+		pdx-> dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &pdx ->NumOfMappedRegister);
+
+	if (pdx->dmaAdapter == nullptr) {
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
 
 	}
 
@@ -623,7 +631,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		}
 	}
 	else {
-
 		Irp->IoStatus.Status = status;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
 		return status;
@@ -640,12 +647,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 NTSTATUS HandleQueryRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	//UNREFERENCED_PARAMETER(Irp);
-	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
-		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
-	}
-	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
-	}
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
@@ -681,15 +682,14 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 		MmUnmapLockedPages(pDmaMem->pvu, pDmaMem->pMdl);
 		IoFreeMdl(pDmaMem->pMdl);
-		pDmaMem->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pDmaMem->dmaAdapter,
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
 			pDmaMem->Length,
 			pDmaMem->dmaAddr,
 			pDmaMem->pvk,
 			FALSE
 		);
 
-		pDmaMem->dmaAdapter->DmaOperations->PutDmaAdapter(pDmaMem->dmaAdapter);
 		ExFreePool(pDmaMem);
 	}
 	pdx->winpci_dma_locker.UnLock();
@@ -722,27 +722,48 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	}
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
-	status = DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
+	status = DefaultPnpHandler(pdx, Irp);      
 
-	IoDeleteSymbolicLink(&pdx->ustrSymLinkName);
+	int devCounter = pdx->DeviceCounter;
+	wchar_t  symLinkNameReal[64] = { 0 };
+	UNICODE_STRING symLinkName;
+
+	swprintf(symLinkNameReal, L"%s%d", DEVICE_SYMLINKNAME, devCounter);
+	RtlInitUnicodeString(&symLinkName, symLinkNameReal);
+
+	status = IoDeleteSymbolicLink(&symLinkName);
+
+	if (NT_SUCCESS(status)) {
+		DbgPrint("Success IoDeleteSymbolicLink\n");
+	}
+	else {
+		DbgPrint("Failure IoDeleteSymbolicLink\n");
+	}
 
 	if (pdx->NextStackDevice)
 	{
 		IoDetachDevice(pdx->NextStackDevice);
+		pdx->NextStackDevice = nullptr;
 	}
 
-	IoDeleteDevice(pdx->fdo);
+	if (pdx->fdo) {
+		IoDeleteDevice(pdx->fdo);
+		pdx->fdo = nullptr;
+	}
+
+	gDeviceCountLocker.Lock();
+	gbDeviceNumber[devCounter] = FALSE;		
+	gDeviceCountLocker.UnLock();
 
 	return status;
-
 }
 
 NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	DbgPrint("HandleStopDevice\n");
+
 	NTSTATUS status;
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
-	DbgPrint("HandleStopDevice\n");
-#if 0
 	if (pdx->bInterruptEnable) {
 		DbgPrint("IoDisconnectInterruptEx\n");
 		pdx->bInterruptEnable = false;
@@ -753,9 +774,11 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 		IoDisconnectInterruptEx(&Disconnect);
 	}
 
+	pdx->winpci_dma_locker.Lock();
+
 	while (!IsListEmpty(&pdx->winpci_dma_linkListHead))
 	{
-		DbgPrint("Unalloc DMA\n");
+		DbgPrint("%s: IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY\n", __func__);
 
 		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winpci_dma_linkListHead);
 		PMEMORY pDmaMem = CONTAINING_RECORD(pEntry, MEMORY, ListEntry);
@@ -763,25 +786,24 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 		MmUnmapLockedPages(pDmaMem->pvu, pDmaMem->pMdl);
 		IoFreeMdl(pDmaMem->pMdl);
-
-		pDmaMem->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pDmaMem->dmaAdapter,
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
 			pDmaMem->Length,
 			pDmaMem->dmaAddr,
 			pDmaMem->pvk,
 			FALSE
 		);
 
-		pDmaMem->dmaAdapter->DmaOperations->PutDmaAdapter(pDmaMem->dmaAdapter);
-
 		ExFreePool(pDmaMem);
 	}
+	pdx->winpci_dma_locker.UnLock();
 
-	while (!IsListEmpty(&winpci_mmap_linkListHead))
+	pdx->winpci_mmap_locker.Lock();
+	while (!IsListEmpty(&pdx->winpci_mmap_linkListHead))
 	{
-		PLIST_ENTRY pEntry = RemoveTailList(&winpci_mmap_linkListHead);
+		DbgPrint("%s: IOCTL_WINPCI_UNMAP_MEMORY\n", __func__);
+		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winpci_mmap_linkListHead);
 		PMAPINFO pMapInfo = CONTAINING_RECORD(pEntry, MAPINFO, ListEntry);
-
 		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
 
 		MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
@@ -789,7 +811,9 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
 
 		ExFreePool(pMapInfo);
+
 	}
+	pdx->winpci_mmap_locker.UnLock();
 
 	for (int i = 0; i < MAX_EVENT_SZ; ++i) {
 		if (pdx->eventHandle[i]) {
@@ -799,9 +823,15 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 			pdx->eventHandle[i] = nullptr;
 		}
 	}
-#endif
+
+	if (pdx->dmaAdapter) {
+		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
+		pdx->dmaAdapter = nullptr;
+	}
+	
 	Irp->IoStatus.Status = STATUS_SUCCESS;
-	return DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
+	return DefaultPnpHandler(pdx, Irp);      
+
 }
 
 NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
@@ -1015,14 +1045,6 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 	PDEVICE_EXTENSION	pdx;
 	ULONG dwIoCtlCode;
 
-	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
-		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
-	}
-	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
-	}
-
-
 	pdx = (PDEVICE_EXTENSION)fdo->DeviceExtension;
 
 	irp->IoStatus.Status = STATUS_SUCCESS;
@@ -1045,7 +1067,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		switch (dwIoCtlCode) {
 		case IOCTL_WINPCI_MAP_MEMORY:
 
-			if (dwInBufLen == sizeof(WINPCI) && dwOutBufLen == sizeof(PVOID))
+			if (dwInBufLen == sizeof(WINPCI) && dwOutBufLen == sizeof(WINPCI))
 			{
 				PHYSICAL_ADDRESS phyAddr;
 				PVOID pvk, pvu;
@@ -1080,8 +1102,14 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							InsertHeadList(&pdx->winpci_mmap_linkListHead, &pMapInfo->ListEntry);
 							pdx->winpci_mmap_locker.UnLock();
 
-							RtlCopyMemory(pSysBuf, &pvu, sizeof(PVOID));
-							irp->IoStatus.Information = sizeof(PVOID);
+							WINPCI   mem;
+							mem.phyAddr = (PVOID)phyAddr.QuadPart;
+							mem.pvu = pvu;
+							mem.dwSize = pMem->dwSize;
+
+							RtlCopyMemory(pSysBuf, &mem, sizeof(WINPCI));
+
+							irp->IoStatus.Information = sizeof(WINPCI);
 
 						}
 						else {
@@ -1097,12 +1125,14 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 						irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
 					}
 				}
-				else
+				else{
 					irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+				}
 			}
-			else
+			else{
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-
+			}
+			
 			break;
 
 		case IOCTL_WINPCI_UNMAP_MEMORY:
@@ -1135,17 +1165,18 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 
 							ExFreePool(pMapInfo);
 						}
-						else
+						else {
 							irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-
+						}
 						break;
 					}
 					pLink = pLink->Flink;
 				}
 			}
-			else
+			else{
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-
+			}
+			
 			break;
 
 		case IOCTL_WINPCI_ALLOCATE_DMA_MEMORY:
@@ -1157,27 +1188,10 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 				PVOID pvk = nullptr;
 				PHYSICAL_ADDRESS phyAddr;
 
-				DEVICE_DESCRIPTION DeviceDescription;
-				RtlZeroMemory(&DeviceDescription, sizeof(DEVICE_DESCRIPTION));
-
-				DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION3;
-				DeviceDescription.Master = TRUE;
-				DeviceDescription.ScatterGather = TRUE;
-				DeviceDescription.IgnoreCount = TRUE;
-				DeviceDescription.DmaChannel = 0;
-				DeviceDescription.Dma32BitAddresses = TRUE;
-				DeviceDescription.Dma64BitAddresses = TRUE;
-				DeviceDescription.InterfaceType = PCIBus;
-				DeviceDescription.MaximumLength = pMem->dwSize;  
-				DeviceDescription.DmaAddressWidth = 32;
-
-				ULONG						NumOfMappedRegister;
-				_DMA_ADAPTER* dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &NumOfMappedRegister);
-
-				if (dmaAdapter) {
+				if (pdx->dmaAdapter) {
 #if 1
-					pvk = dmaAdapter->DmaOperations->AllocateCommonBuffer(
-						dmaAdapter,
+					pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+						pdx->dmaAdapter,
 						pMem->dwSize,
 						&phyAddr,
 						FALSE
@@ -1217,8 +1231,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							pDmaMapInfo->pMdl = pMdl;
 							pDmaMapInfo->pvk = pvk;
 							pDmaMapInfo->pvu = pvu;
-							pDmaMapInfo->dmaAdapter = dmaAdapter;
-
+						
 							pDmaMapInfo->dmaAddr.QuadPart = phyAddr.QuadPart;
 							pDmaMapInfo->Length = pMem->dwSize;
 
@@ -1241,37 +1254,38 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 						}
 						else {
 							IoFreeMdl(pMdl);
-							dmaAdapter->DmaOperations->FreeCommonBuffer(
-								dmaAdapter,
+							pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+								pdx->dmaAdapter,
 								pMem->dwSize,
 								phyAddr,
 								pvk,
 								FALSE
 							);
-							dmaAdapter->DmaOperations->PutDmaAdapter(dmaAdapter);
+							//pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
 							irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
 						}
 					}
 					else
 					{
 						//allocate mdl error, unmap the mapped physical memory
-						dmaAdapter->DmaOperations->FreeCommonBuffer(
-							dmaAdapter,
+						pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+							pdx->dmaAdapter,
 							pMem->dwSize,
 							phyAddr,
 							pvk,
 							FALSE
 						);
-						dmaAdapter->DmaOperations->PutDmaAdapter(dmaAdapter);
 						irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
 					}
 				}
-				else
+				else {
 					irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+				}
 			}
-			else
+			else{
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-
+			}
+			
 			break;
 
 		case IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY:
@@ -1294,15 +1308,13 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							MmUnmapLockedPages(pDmaMapInfo->pvu, pDmaMapInfo->pMdl);
 							IoFreeMdl(pDmaMapInfo->pMdl);
 
-							pDmaMapInfo->dmaAdapter->DmaOperations->FreeCommonBuffer(
-								pDmaMapInfo->dmaAdapter,
+							pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+								pdx->dmaAdapter,
 								pDmaMapInfo->Length,
 								pDmaMapInfo->dmaAddr,
 								pDmaMapInfo->pvk,
 								FALSE
 							);
-
-							pDmaMapInfo->dmaAdapter->DmaOperations->PutDmaAdapter(pDmaMapInfo->dmaAdapter);
 
 							pdx->winpci_dma_locker.Lock();
 							RemoveEntryList(&pDmaMapInfo->ListEntry);
@@ -1311,15 +1323,13 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							ExFreePool(pDmaMapInfo);
 							DbgPrint("Leave IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY\n");
 						}
-						else
+						else {
 							irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-
+						}
 						break;
 					}
-
 					pLink = pLink->Flink;
 				}
-
 			}
 			else
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
@@ -1349,12 +1359,10 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 	return status;
 }
 
-
 void WINPCIUnload(IN PDRIVER_OBJECT DriverObject)
 {
 	UNREFERENCED_PARAMETER(DriverObject);
 	DbgPrint("WINPCIUnload\n");
-
 }
 
 void WINPCIDelay(long long millsecond)

@@ -7,7 +7,13 @@
 #include "acpi.h"
 #include "nvme.h"
 
-#define ACTION_EVENT "Global\\Device0Event0"
+//char action_event[MAX_PATH] = { 0 };
+#define ACTION_EVENT  "Global\\Device0Event0"
+#define THREAD_START "thread start"
+#define SYNC_COMMAND "sync command"
+
+HANDLE ghThreadStart;
+HANDLE ghSyncCommand;
 
 nvme_controller_reg_t* ctrl_reg;
 
@@ -35,14 +41,16 @@ unsigned __stdcall isr_thread(LPVOID param)
     }
 
     printf("Thread Start\n");
+    SetEvent(ghThreadStart);
 
     while (1) {
 
-      /* admin コマンドとIOコマンドでeventを分ける必要があるので、 WaitForMultiを使い、戻り値でどのeventがシグナル状態になったかを判別する。
-      IO Queue 2個の場合、
+      /*
       event[0]  ---- Admin Command
       event[1]  ---- IO Command
       event[2]  ---- IO Command
+      -----
+      event[n]  ---- IO Command
       */
         DWORD ret = WaitForMultipleObjects(1, &event, FALSE, INFINITE);
 
@@ -64,6 +72,7 @@ unsigned __stdcall isr_thread(LPVOID param)
                     }
                     *(volatile u32*)(admin_cq_doorbell) = admin_cq_head;
                     //ctrl_reg->sq0tdbl[1] = admin_cq_head;
+                    SetEvent(ghSyncCommand);
                 }
             }
         }
@@ -78,11 +87,17 @@ unsigned __stdcall isr_thread(LPVOID param)
 
 int main()
 {
-    DWORD busNum = 0x03;
+    DWORD busNum = 0x04;
     DWORD devNum = 0x00;
     DWORD funcNum = 0x00;
 
     DWORD MCFGDataSize;
+
+    ghThreadStart = CreateEvent(NULL, FALSE, TRUE, THREAD_START);
+    ResetEvent(ghThreadStart);
+
+    ghSyncCommand = CreateEvent(NULL, FALSE, TRUE, SYNC_COMMAND);
+    ResetEvent(ghSyncCommand);
 
     MCFGDataSize = GetSystemFirmwareTable(
         'ACPI',
@@ -106,8 +121,11 @@ int main()
         NULL
     );
 
-    if (handle == INVALID_HANDLE_VALUE)
+    if (handle == INVALID_HANDLE_VALUE) {
         std::cerr << "failure " << std::endl;
+        system("pause");
+        return 1;
+    }
 
    DWORD dwBytes = 0;
    BOOL bRet = FALSE;
@@ -123,6 +141,8 @@ int main()
     else {
         printf("Failure  IOCTL_WINPCI_GET_BDF : %d\n", GetLastError());
         CloseHandle(handle);
+        system("pause");
+
         return 1;
     }
     
@@ -130,9 +150,8 @@ int main()
     WINPCI pcie_config = { 0 };
     pcie_config.phyAddr = (PVOID)map_address;
     pcie_config.dwSize = 4096;	    //memory size
-    PVOID pcie_config_va = nullptr;	//mapped virtual addr
 
-    bRet = DeviceIoControl(handle, IOCTL_WINPCI_MAP_MEMORY, &pcie_config, sizeof(WINPCI), &pcie_config_va, sizeof(PVOID), &dwBytes, nullptr);
+    bRet = DeviceIoControl(handle, IOCTL_WINPCI_MAP_MEMORY, &pcie_config, sizeof(WINPCI), &pcie_config, sizeof(WINPCI), &dwBytes, nullptr);
 
     if (bRet) {
         printf("Success map  pci config regsiter: %p, %p, %d, %d\n", pcie_config.pvu, pcie_config.phyAddr, pcie_config.dwSize, dwBytes);
@@ -140,19 +159,20 @@ int main()
     else {
         printf("Failure  map  pci config regsiter : %d\n", GetLastError());
         CloseHandle(handle);
+        system("pause");
+
         return 1;
     }
 
     /* Map nvme register */
-    DWORD bar0 = *(DWORD*)((UINT8*)pcie_config_va + 0x10) & 0xfffffff0;
+    DWORD bar0 = *(DWORD*)((UINT8*)pcie_config.pvu + 0x10) & 0xfffffff0;
     printf("BAR: %lx\n", bar0);
 
     WINPCI nvme_reg = { 0 };
     nvme_reg.phyAddr = (PVOID)bar0;
     nvme_reg.dwSize = 8192;
-    PVOID nvme_reg_va = nullptr;	//mapped virtual addr
 
-    bRet = DeviceIoControl(handle, IOCTL_WINPCI_MAP_MEMORY, &nvme_reg, sizeof(WINPCI), &nvme_reg_va, sizeof(PVOID), &dwBytes, nullptr);
+    bRet = DeviceIoControl(handle, IOCTL_WINPCI_MAP_MEMORY, &nvme_reg, sizeof(WINPCI), &nvme_reg, sizeof(WINPCI), &dwBytes, nullptr);
 
     if (bRet) {
         printf("Success map  nvme regsiter: %p, %p, %d, %d\n", nvme_reg.pvu, nvme_reg.phyAddr, nvme_reg.dwSize, dwBytes);
@@ -160,10 +180,12 @@ int main()
     else {
         printf("Failure  map  pci nvme regsiter : %d\n", GetLastError());
         CloseHandle(handle);
+        system("pause");
+
         return 1;
     }
 
-    ctrl_reg = (nvme_controller_reg_t*)nvme_reg_va;
+    ctrl_reg = (nvme_controller_reg_t*)nvme_reg.pvu;
     
    printf("CAP TO: %d\n", ctrl_reg->cap.a.to);
 
@@ -179,11 +201,15 @@ int main()
 
     bRet = DeviceIoControl(handle, IOCTL_WINPCI_ALLOCATE_DMA_MEMORY, &adminCQ, sizeof(WINPCI), &adminCQ, sizeof(WINPCI), &dwBytes, nullptr);
 
-    if (bRet)
-       printf("Success create CQ: %p, %p, %d, %d\n", adminCQ.pvu, adminCQ.phyAddr, adminCQ.dwSize, dwBytes);
-    else
-       printf("Failure  create CQ : %d\n",  GetLastError());
-   
+    if (bRet) {
+        printf("Success create CQ: %p, %p, %d, %d\n", adminCQ.pvu, adminCQ.phyAddr, adminCQ.dwSize, dwBytes);
+    }
+    else {
+        printf("Failure  create CQ : %d\n", GetLastError());
+        CloseHandle(handle);
+        system("pause");
+        return 1;
+    }
 
     /* allocate admin SQ  */
     adminSQ.dwSize = sizeof(nvme_sq_entry_t) * admin_sq_size;	    //memory size
@@ -196,10 +222,12 @@ int main()
         printf("Failure  create SQ : %d\n", GetLastError());
    
     admin_cq_entry = (nvme_cq_entry_t*)adminCQ.pvu;
-    memset(adminCQ.pvu, 0, sizeof(nvme_cq_entry_t) * admin_cq_size);
+    //memset(adminCQ.pvu, 0, sizeof(nvme_cq_entry_t) * admin_cq_size);
+    ZeroMemory(adminCQ.pvu, sizeof(nvme_cq_entry_t)* admin_cq_size);
 
     admin_sq_entry = (nvme_sq_entry_t*)adminSQ.pvu;
-    memset(adminSQ.pvu, 0, sizeof(nvme_sq_entry_t) * admin_sq_size);
+    //memset(adminSQ.pvu, 0, sizeof(nvme_sq_entry_t) * admin_sq_size);
+    ZeroMemory(adminSQ.pvu, sizeof(nvme_sq_entry_t) * admin_sq_size);
 
     nvme_controller_cap_t cap = { 0 };
     nvme_adminq_attr_t	aqa = { 0 };
@@ -252,7 +280,7 @@ int main()
     UINT ThreadId = 0;
     HANDLE isrthread = (HANDLE)_beginthreadex(NULL, 0, isr_thread, nullptr, 0, &ThreadId);
 
-    Sleep(1000);
+    WaitForSingleObject(ghThreadStart, INFINITE);
 
     /* allocate data buffer */
     WINPCI dataBuffer = { 0 };
@@ -261,9 +289,9 @@ int main()
     bRet = DeviceIoControl(handle, IOCTL_WINPCI_ALLOCATE_DMA_MEMORY, &dataBuffer, sizeof(WINPCI), &dataBuffer, sizeof(WINPCI), &dwBytes, nullptr);
 
     if (bRet)
-        printf("Success IOCTL_WINPCI_ALLOCATE_DMA_MEMORY: %p, %p, %d, %d\n", dataBuffer.pvu, dataBuffer.phyAddr, dataBuffer.dwSize, dwBytes);
+        printf("Success allocate data buffer: %p, %p, %d, %d\n", dataBuffer.pvu, dataBuffer.phyAddr, dataBuffer.dwSize, dwBytes);
     else
-        printf("Failure  IOCTL_WINPCI_ALLOCATE_DMA_MEMORY : %d\n", GetLastError());
+        printf("Failure  allocate data buffer: %d\n", GetLastError());
 
     memset(dataBuffer.pvu, 0, 4096);
 
@@ -279,7 +307,7 @@ int main()
     if (++admin_sq_tail == admin_sq_size) admin_sq_tail = 0;
     *(volatile u32*)admin_sq_doorbell = admin_sq_tail;
 
-    Sleep(2000);
+    WaitForSingleObject(ghSyncCommand, INFINITE);
 
     nvme_id_ctrl* ctrl = (nvme_id_ctrl*)dataBuffer.pvu;
     printf("vendor id: %x\n", ctrl->vid);
@@ -318,8 +346,46 @@ int main()
        log->data_units_written[0] << 0
    );
 #endif
-   
+
+   bRet = DeviceIoControl(handle, IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY, &dataBuffer, sizeof(WINPCI), nullptr, 0, nullptr, nullptr);
+
+   if (bRet)
+       printf("Success unallocate data buffer\n");
+   else
+       printf("Failure unallocate data buffer: %d\n", GetLastError());
+
+   bRet = DeviceIoControl(handle, IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY, &adminSQ, sizeof(WINPCI), nullptr, 0, nullptr, nullptr);
+
+   if (bRet)
+       printf("Success unallocate admin SQ\n");
+   else
+       printf("Failure unallocate admin SQ: %d\n", GetLastError());
+
+   bRet = DeviceIoControl(handle, IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY, &adminCQ, sizeof(WINPCI), nullptr, 0, nullptr, nullptr);
+
+   if (bRet)
+       printf("Success unallocate admin CQ\n");
+   else
+       printf("Failure unallocate admin CQ: %d\n", GetLastError());
+
+   bRet = DeviceIoControl(handle, IOCTL_WINPCI_UNMAP_MEMORY, &nvme_reg, sizeof(WINPCI), nullptr, 0, nullptr, nullptr);
+
+   if (bRet)
+       printf("Success unallocate  controller reg \n");
+   else
+       printf("Failure unallocate controller reg : %d\n", GetLastError());
+
+   bRet = DeviceIoControl(handle, IOCTL_WINPCI_UNMAP_MEMORY, &pcie_config, sizeof(WINPCI), nullptr, 0, nullptr, nullptr);
+
+   if (bRet)
+       printf("Success unallocate pcie config reg \n");
+   else
+       printf("Failure unallocate  pcie config reg : %d\n", GetLastError());
+
+
     system("pause");
+    CloseHandle(ghSyncCommand);
+    CloseHandle(ghThreadStart);
     CloseHandle(isrthread);
     CloseHandle(handle);
 
