@@ -6,14 +6,14 @@
 #include "FastMutex.h"
 #include "SpinLock.h"
 
-const int MAX_EVENT_SZ = 16;
-const int  EVENTNAMEMAXLEN = 100;
-
 #define arraysize( p ) ( sizeof( p ) / sizeof( ( p )[0] ) )
 
 #define DEVICE_NAME					( L"\\Device\\WINPCI" )
 #define DEVICE_SYMLINKNAME	( L"\\DosDevices\\WINPCI" )
 
+const int MAX_EVENT_SZ = 16;
+const int  EVENTNAMEMAXLEN = 100;
+const int BUFFER_SIZE = 256;
 const int MAX_DEVICE_COUNT = 100;
 bool gbDeviceNumber[MAX_DEVICE_COUNT] = { FALSE };
 FastMutex	gDeviceCountLocker;
@@ -64,6 +64,7 @@ typedef struct _DEVICE_EXTENSION
 	USHORT						    func;
 } DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
+VOID WINPCILogger(char* text);
 void WINPCIDelay(long long millsecond);
 NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 NTSTATUS WINPCIPnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
@@ -172,6 +173,7 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	UNICODE_STRING		symLinkName;
 
 	DbgPrint("WINPCIAddDevice\n");
+	WINPCILogger("WINPCIAddDevice\n");
 
 	//DECLARE_UNICODE_STRING_SIZE(devName, 64);
 	//DECLARE_UNICODE_STRING_SIZE(symLinkName, 64);
@@ -195,11 +197,13 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	RtlInitUnicodeString(&devName, devNameReal);
 	//RtlUnicodeStringPrintf(&devName, L"\\Device\\WINPCI%d", gucDeviceCounter);
 
-	DbgPrint("Add Device\n");
+	//DbgPrint("Add Device\n");
 	status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), &devName, FILE_DEVICE_UNKNOWN, 0, FALSE, &fdo);
 	if (!NT_SUCCESS(status))
 	{
 		DbgPrint("Failure IoCreateDevice\n");
+		WINPCILogger("Failure IoCreateDevice\n");
+
 		return status;
 	}
 	pdx = (PDEVICE_EXTENSION)fdo->DeviceExtension;
@@ -223,6 +227,8 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	if (!NT_SUCCESS(status))
 	{
 		DbgPrint("Failure IoAttachDeviceToDeviceStackSafe");
+		WINPCILogger("Failure IoAttachDeviceToDeviceStackSafe\n");
+
 		return status;
 	}
 
@@ -237,6 +243,7 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	if (!NT_SUCCESS(status))
 	{
 		DbgPrint("Failure IoCreateSymbolicLink\n");
+		WINPCILogger("Failure IoCreateSymbolicLink\n");
 
 		IoDeleteSymbolicLink(&pdx->ustrSymLinkName);
 		status = IoCreateSymbolicLink(&symLinkName, &devName);
@@ -251,8 +258,8 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 	fdo->Flags |= DO_DIRECT_IO | DO_POWER_PAGABLE;
 	fdo->Flags &= ~DO_DEVICE_INITIALIZING;
 
-	DbgPrint("Success DriverEntry\n");
-
+	DbgPrint("Success WINPCIAddDevice\n");
+	WINPCILogger("Success WINPCIAddDevice\n");
 	//gucDeviceCounter++;
 	//InterlockedIncrement(&gucDeviceCounter);
 	return STATUS_SUCCESS;
@@ -467,6 +474,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	int i;
 
 	DbgPrint("HandleStartDevice\n");
+	WINPCILogger("HandleStartDevice\n");
 
 	status = ForwardAndWait(pdx, Irp);
 
@@ -474,6 +482,8 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	{
 		Irp->IoStatus.Status = status;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		WINPCILogger("Failure ForwardAndWait\n");
+
 		return status;
 	}
 
@@ -496,8 +506,11 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		status = STATUS_UNSUCCESSFUL;
 		Irp->IoStatus.Status = status;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		WINPCILogger("Failure translated\n");
+
 		return status;
 	}
+
 	PCM_PARTIAL_RESOURCE_DESCRIPTOR resource = translated->PartialDescriptors;
 
 	ULONG  length;
@@ -551,8 +564,9 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		status = STATUS_UNSUCCESSFUL;
 		Irp->IoStatus.Status = status;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
-		return status;
+		WINPCILogger("Failure IoGetDmaAdapter\n");
 
+		return status;
 	}
 
 	/* Setting  Interrupt */
@@ -579,6 +593,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		pp = p->MessageInfo;
 		DbgPrint("interrupt version: %d", Connect.Version);
 
+#if 0
 		for (int i = 0; i < (int)p->MessageCount; ++i) {
 			DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
 				(pp + i)->Irql,
@@ -587,6 +602,8 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 				(pp + i)->MessageData,
 				(pp + i)->MessageAddress.LowPart
 			);
+
+			Logger("path 2\n");
 
 			UNICODE_STRING name;
 			UNICODE_STRING eventbase;
@@ -623,14 +640,19 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 				status = STATUS_UNSUCCESSFUL;
 				Irp->IoStatus.Status = status;
 				IoCompleteRequest(Irp, IO_NO_INCREMENT);
+				Logger("Failure IoCreateNotificationEvent\n");
 				return status;
 			}
 
 			KeClearEvent(pdx->pEvent[i]);
 
 		}
+#endif
+
 	}
 	else {
+		WINPCILogger("Failure IoConnectInterruptEx\n");
+
 		Irp->IoStatus.Status = status;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
 		return status;
@@ -647,16 +669,16 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 NTSTATUS HandleQueryRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	//UNREFERENCED_PARAMETER(Irp);
-
+	WINPCILogger("HandleQueryRemoveDevice\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
-
 }
 
 NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	NTSTATUS status;
 	DbgPrint("HandleRemoveDevice\n");
+	WINPCILogger("HandleRemoveDevice\n");
 
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
@@ -760,6 +782,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	DbgPrint("HandleStopDevice\n");
+	WINPCILogger("HandleStopDevice\n");
 
 	NTSTATUS status;
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
@@ -835,7 +858,7 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 }
 
 NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	DbgPrint("HandleQueryStopDevice\n");
+	WINPCILogger("HandleQueryStopDevice\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
 }
@@ -1056,6 +1079,9 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 
 	ULONG dwInBufLen = irpStack->Parameters.DeviceIoControl.InputBufferLength;
 	ULONG dwOutBufLen = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+
+	PIO_INTERRUPT_MESSAGE_INFO p;
+	PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
 
 	switch (irpStack->MajorFunction)
 	{
@@ -1348,6 +1374,67 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		
 			break;
 
+		case IOCTL_WINPCI_CREATE_EVENT:
+			p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
+			pp = p->MessageInfo;
+
+			for (int i = 0; i < (int)p->MessageCount; ++i) {
+				if (i == MAX_EVENT_SZ)break;
+				DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
+					(pp + i)->Irql,
+					(pp + i)->Vector,
+					(pp + i)->TargetProcessorSet,
+					(pp + i)->MessageData,
+					(pp + i)->MessageAddress.LowPart
+				);
+				
+				UNICODE_STRING name;
+				UNICODE_STRING eventbase;
+				UNICODE_STRING eventname;
+				STRING eventnameString;
+
+				char cEventName[EVENTNAMEMAXLEN] = { 0 };
+
+				sprintf(cEventName, "Device%dEvent%d", pdx->DeviceCounter, i);
+
+				RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
+
+				name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
+				name.Length = 0;
+				name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
+				RtlZeroMemory(name.Buffer, name.MaximumLength);
+
+				RtlInitString(&eventnameString, cEventName);
+				RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
+
+				RtlCopyUnicodeString(&name, &eventbase);
+				RtlAppendUnicodeStringToString(&name, &eventname);
+				RtlFreeUnicodeString(&eventname);
+
+				pdx->pEvent[i] = IoCreateNotificationEvent(&name, &pdx->eventHandle[i]);
+
+				ExFreePool(name.Buffer);
+
+				if (!pdx->pEvent[i]) {
+					for (int j = 0; j < i - 1; ++j) {
+						ZwClose(pdx->eventHandle[j]);
+						pdx->eventHandle[j] = nullptr;
+					}
+					WINPCILogger("Failure IoCreateNotificationEvent\n");
+					irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+					break;
+				}
+				KeClearEvent(pdx->pEvent[i]);
+			}
+			break;
+		case IOCTL_WINPCI_DELETE_EVENT:
+			for (int i = 0; i < MAX_EVENT_SZ; ++i) {
+				if (pdx->eventHandle[i]) {
+					ZwClose(pdx->eventHandle[i]);
+					pdx->eventHandle[i] = nullptr;
+				}
+			}
+			break;
 		default:
 			break;
 		}
@@ -1374,4 +1461,72 @@ void WINPCIDelay(long long millsecond)
 	delayValue.QuadPart = 10 * 1000 * millsecond; // 320 millisecond
 	delayTrue.QuadPart = -(delayValue.QuadPart);
 	ntRet = KeDelayExecutionThread(KernelMode, FALSE, &delayTrue);
+}
+
+VOID WINPCILogger(char* text) {
+
+	UNICODE_STRING     uniName;
+	OBJECT_ATTRIBUTES  objAttr;
+
+	RtlInitUnicodeString(&uniName, L"\\SystemRoot\\winpcilog.txt");
+	InitializeObjectAttributes(&objAttr, &uniName,
+		OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+		NULL, NULL);
+
+	HANDLE   handle;
+	NTSTATUS ntstatus;
+	IO_STATUS_BLOCK    ioStatusBlock;
+
+	// Do not try to perform any file operations at higher IRQL levels.
+	// Instead, you may use a work item or a system worker thread to perform file operations.
+
+	if (KeGetCurrentIrql() != PASSIVE_LEVEL) return;
+	//return STATUS_INVALID_DEVICE_STATE;
+
+	ntstatus = ZwCreateFile(
+		&handle,
+		GENERIC_WRITE,
+		&objAttr,
+		&ioStatusBlock, 
+		nullptr,
+		FILE_ATTRIBUTE_NORMAL,
+		0,
+		FILE_OPEN_IF,
+		FILE_SYNCHRONOUS_IO_NONALERT,
+		nullptr,
+		0
+	);
+
+	CHAR     buffer[BUFFER_SIZE];
+	size_t  cb;
+
+	if (NT_SUCCESS(ntstatus)) {
+		ntstatus = RtlStringCbPrintfA(buffer, sizeof(buffer), text, 0x0);
+		if (NT_SUCCESS(ntstatus)) {
+			ntstatus = RtlStringCbLengthA(buffer, sizeof(buffer), &cb);
+			if (NT_SUCCESS(ntstatus)) {
+
+				FILE_STANDARD_INFORMATION info;
+				IO_STATUS_BLOCK IoStatus;
+
+				ntstatus = ZwQueryInformationFile(handle, &IoStatus, &info, sizeof(info), FileStandardInformation);
+
+				//DbgPrint("file size: %d\n", info.EndOfFile.QuadPart);
+				if (NT_SUCCESS(ntstatus)) {
+					ntstatus = ZwWriteFile(
+						handle, 
+						nullptr,
+						nullptr,
+						nullptr,
+						&ioStatusBlock,
+						buffer,
+						(ULONG)cb, 
+						&info.EndOfFile, 
+						nullptr
+					);
+				}
+			}
+		}
+		ZwClose(handle);
+	}
 }

@@ -275,6 +275,14 @@ int main()
     }
     printf("Controller is ready\n");
 
+    /* create event */
+    bRet = DeviceIoControl(handle, IOCTL_WINPCI_CREATE_EVENT, nullptr, 0, nullptr, 0, nullptr, nullptr);
+
+    if (bRet)
+        printf("Success create event\n");
+    else
+        printf("Failure  create event: %d\n", GetLastError());
+
 
     /*  kick thread  */
     UINT ThreadId = 0;
@@ -353,6 +361,17 @@ int main()
        printf("Success unallocate data buffer\n");
    else
        printf("Failure unallocate data buffer: %d\n", GetLastError());
+
+
+   /* delete event */
+   bRet = DeviceIoControl(handle, IOCTL_WINPCI_DELETE_EVENT, nullptr, 0, nullptr, 0, nullptr, nullptr);
+
+   if (bRet)
+       printf("Success delete event\n");
+   else
+       printf("Failure  delete event: %d\n", GetLastError());
+
+
 
    bRet = DeviceIoControl(handle, IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY, &adminSQ, sizeof(WINPCI), nullptr, 0, nullptr, nullptr);
 
