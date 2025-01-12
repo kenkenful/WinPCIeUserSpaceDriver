@@ -108,7 +108,6 @@ MSI_ISR(
 )
 {
 	UNREFERENCED_PARAMETER(Interrupt);
-	//DbgPrint("Interrupt Occured: %d\n", MessageId);
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)ServiceContext;
 
 	p->MessageId = MessageId;
@@ -124,10 +123,11 @@ FdoInterruptCallback(
 )
 {
 	UNREFERENCED_PARAMETER(InterruptObject);
-	//UNREFERENCED_PARAMETER(Context);
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)Context;
 
-	DbgPrint("interrupt\n");
+	p->MessageId = 0;
+	IoRequestDpc(p->fdo, NULL, p);
+
 	return TRUE;
 }
 
@@ -141,7 +141,7 @@ VOID DPC(
 	UNREFERENCED_PARAMETER(Dpc);
 	UNREFERENCED_PARAMETER(DeviceObject);
 	UNREFERENCED_PARAMETER(irp);
-	//UNREFERENCED_PARAMETER(context);
+
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)context;
 	
 	DbgPrint("interrupt\n");
@@ -453,14 +453,6 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 
 #endif
 
-BOOLEAN OnInterrupt(PKINTERRUPT InterruptObject, PDEVICE_EXTENSION pdx)
-{
-	UNREFERENCED_PARAMETER(InterruptObject);
-	UNREFERENCED_PARAMETER(pdx);
-
-	return TRUE;
-}
-
 NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	NTSTATUS	status;
@@ -593,7 +585,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		pp = p->MessageInfo;
 		DbgPrint("interrupt version: %d", Connect.Version);
 
-#if 0
 		for (int i = 0; i < (int)p->MessageCount; ++i) {
 			DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
 				(pp + i)->Irql,
@@ -602,53 +593,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 				(pp + i)->MessageData,
 				(pp + i)->MessageAddress.LowPart
 			);
-
-			Logger("path 2\n");
-
-			UNICODE_STRING name;
-			UNICODE_STRING eventbase;
-			UNICODE_STRING eventname;
-			STRING eventnameString;
-
-			char cEventName[EVENTNAMEMAXLEN] = { 0 };
-
-			sprintf(cEventName, "Device%dEvent%d", pdx-> DeviceCounter, i);
-
-			RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
-
-			name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
-			name.Length = 0;
-			name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
-			RtlZeroMemory(name.Buffer, name.MaximumLength);
-
-			RtlInitString(&eventnameString, cEventName);
-			RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
-
-			RtlCopyUnicodeString(&name, &eventbase);
-			RtlAppendUnicodeStringToString(&name, &eventname);
-			RtlFreeUnicodeString(&eventname);
-
-			pdx->pEvent[i] = IoCreateNotificationEvent(&name, &pdx->eventHandle[i]);
-
-			ExFreePool(name.Buffer);
-
-			if (!pdx->pEvent[i]) {
-				for (int j = 0; j < i - 1; ++j) {
-					ZwClose(pdx->eventHandle[j]);
-					pdx->eventHandle[j] = nullptr;
-				}
-				status = STATUS_UNSUCCESSFUL;
-				Irp->IoStatus.Status = status;
-				IoCompleteRequest(Irp, IO_NO_INCREMENT);
-				Logger("Failure IoCreateNotificationEvent\n");
-				return status;
-			}
-
-			KeClearEvent(pdx->pEvent[i]);
-
 		}
-#endif
-
 	}
 	else {
 		WINPCILogger("Failure IoConnectInterruptEx\n");
@@ -1080,9 +1025,6 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 	ULONG dwInBufLen = irpStack->Parameters.DeviceIoControl.InputBufferLength;
 	ULONG dwOutBufLen = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
 
-	PIO_INTERRUPT_MESSAGE_INFO p;
-	PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
-
 	switch (irpStack->MajorFunction)
 	{
 
@@ -1375,18 +1317,11 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			break;
 
 		case IOCTL_WINPCI_CREATE_EVENT:
+			PIO_INTERRUPT_MESSAGE_INFO p;
 			p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
-			pp = p->MessageInfo;
 
 			for (int i = 0; i < (int)p->MessageCount; ++i) {
 				if (i == MAX_EVENT_SZ)break;
-				DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
-					(pp + i)->Irql,
-					(pp + i)->Vector,
-					(pp + i)->TargetProcessorSet,
-					(pp + i)->MessageData,
-					(pp + i)->MessageAddress.LowPart
-				);
 				
 				UNICODE_STRING name;
 				UNICODE_STRING eventbase;
@@ -1456,10 +1391,12 @@ void WINPCIDelay(long long millsecond)
 {
 	LARGE_INTEGER	delayValue, delayTrue;
 	NTSTATUS		ntRet;
+	if (KeGetCurrentIrql() > APC_LEVEL) return;
 
 	// 10*1000*1000 is 1 second, so 10*1000 is 1 millsecond
 	delayValue.QuadPart = 10 * 1000 * millsecond; // 320 millisecond
 	delayTrue.QuadPart = -(delayValue.QuadPart);
+
 	ntRet = KeDelayExecutionThread(KernelMode, FALSE, &delayTrue);
 }
 
