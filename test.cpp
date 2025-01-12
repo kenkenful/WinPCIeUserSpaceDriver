@@ -222,11 +222,9 @@ int main()
         printf("Failure  create SQ : %d\n", GetLastError());
    
     admin_cq_entry = (nvme_cq_entry_t*)adminCQ.pvu;
-    //memset(adminCQ.pvu, 0, sizeof(nvme_cq_entry_t) * admin_cq_size);
     ZeroMemory(adminCQ.pvu, sizeof(nvme_cq_entry_t)* admin_cq_size);
 
     admin_sq_entry = (nvme_sq_entry_t*)adminSQ.pvu;
-    //memset(adminSQ.pvu, 0, sizeof(nvme_sq_entry_t) * admin_sq_size);
     ZeroMemory(adminSQ.pvu, sizeof(nvme_sq_entry_t) * admin_sq_size);
 
     nvme_controller_cap_t cap = { 0 };
@@ -301,7 +299,7 @@ int main()
     else
         printf("Failure  allocate data buffer: %d\n", GetLastError());
 
-    memset(dataBuffer.pvu, 0, 4096);
+    ZeroMemory(dataBuffer.pvu, 4096);
 
     int cid = admin_sq_tail;
 
