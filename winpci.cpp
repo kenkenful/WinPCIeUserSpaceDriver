@@ -11,7 +11,7 @@
 #define DEVICE_NAME					( L"\\Device\\WINPCI" )
 #define DEVICE_SYMLINKNAME	( L"\\DosDevices\\WINPCI" )
 
-const int MAX_EVENT_SZ = 16;
+
 const int  EVENTNAMEMAXLEN = 100;
 const int BUFFER_SIZE = 256;
 const int MAX_DEVICE_COUNT = 100;
@@ -187,6 +187,7 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 		if (gbDeviceNumber[i] == FALSE) {
 			devCounter = i;
 			gbDeviceNumber[i] = TRUE;
+			break;
 			break;
 		}
 	}
@@ -542,12 +543,17 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	DeviceDescription.Master = TRUE;
 	DeviceDescription.ScatterGather = TRUE;
 	DeviceDescription.IgnoreCount = TRUE;
-	DeviceDescription.DmaChannel = resource->u.Dma.Channel;
-	DeviceDescription.Dma32BitAddresses = FALSE;
-	DeviceDescription.Dma64BitAddresses = FALSE;
+	//DeviceDescription.DmaChannel = resource->u.Dma.Channel;    // This is slave only
+	DeviceDescription.Dma32BitAddresses = TRUE;
+	DeviceDescription.DmaAddressWidth = 32;
+
+	if (Mm64BitPhysicalAddress) {
+		DeviceDescription.Dma64BitAddresses = TRUE;
+		DeviceDescription.DmaAddressWidth = 64;
+	}
 	DeviceDescription.InterfaceType = PCIBus;
 	DeviceDescription.MaximumLength =  0x10000000;
-	DeviceDescription.DmaAddressWidth = 64;
+
 
 	if(pdx->dmaAdapter == nullptr)
 		pdx-> dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &pdx ->NumOfMappedRegister);
@@ -619,117 +625,8 @@ NTSTATUS HandleQueryRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	return  DefaultPnpHandler(pdx, Irp);
 }
 
-NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
-{
-	NTSTATUS status;
-	DbgPrint("HandleRemoveDevice\n");
-	WINPCILogger("HandleRemoveDevice\n");
+void releaseResource(PDEVICE_EXTENSION pdx) {
 
-	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
-
-	if (pdx->bInterruptEnable) {
-		DbgPrint("IoDisconnectInterruptEx\n");
-		pdx->bInterruptEnable = false;
-		RtlZeroMemory(&Disconnect, sizeof(IO_DISCONNECT_INTERRUPT_PARAMETERS));
-
-		Disconnect.Version = pdx->IsrType;
-		Disconnect.ConnectionContext.InterruptObject = (PKINTERRUPT)pdx->InterruptObject;
-		IoDisconnectInterruptEx(&Disconnect);
-	}
-
-	pdx->winpci_dma_locker.Lock();
-
-	while (!IsListEmpty(&pdx->winpci_dma_linkListHead))
-	{
-		DbgPrint("%s: IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY\n", __func__);
-
-		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winpci_dma_linkListHead);
-		PMEMORY pDmaMem = CONTAINING_RECORD(pEntry, MEMORY, ListEntry);
-		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
-
-		MmUnmapLockedPages(pDmaMem->pvu, pDmaMem->pMdl);
-		IoFreeMdl(pDmaMem->pMdl);
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			pDmaMem->Length,
-			pDmaMem->dmaAddr,
-			pDmaMem->pvk,
-			FALSE
-		);
-
-		ExFreePool(pDmaMem);
-	}
-	pdx->winpci_dma_locker.UnLock();
-
-	pdx->winpci_mmap_locker.Lock();
-	while (!IsListEmpty(&pdx->winpci_mmap_linkListHead))
-	{
-		DbgPrint("%s: IOCTL_WINPCI_UNMAP_MEMORY\n", __func__);
-		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winpci_mmap_linkListHead);
-		PMAPINFO pMapInfo = CONTAINING_RECORD(pEntry, MAPINFO, ListEntry);
-
-		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
-
-		MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
-		IoFreeMdl(pMapInfo->pMdl);
-		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
-
-		ExFreePool(pMapInfo);
-
-	}
-	pdx->winpci_mmap_locker.UnLock();
-
-	for (int i = 0; i < MAX_EVENT_SZ; ++i) {
-		if (pdx->eventHandle[i]) {
-			DbgPrint("ZwClose\n");
-
-			ZwClose(pdx->eventHandle[i]);
-			pdx->eventHandle[i] = nullptr;
-		}
-	}
-
-	Irp->IoStatus.Status = STATUS_SUCCESS;
-	status = DefaultPnpHandler(pdx, Irp);      
-
-	int devCounter = pdx->DeviceCounter;
-	wchar_t  symLinkNameReal[64] = { 0 };
-	UNICODE_STRING symLinkName;
-
-	swprintf(symLinkNameReal, L"%s%d", DEVICE_SYMLINKNAME, devCounter);
-	RtlInitUnicodeString(&symLinkName, symLinkNameReal);
-
-	status = IoDeleteSymbolicLink(&symLinkName);
-
-	if (NT_SUCCESS(status)) {
-		DbgPrint("Success IoDeleteSymbolicLink\n");
-	}
-	else {
-		DbgPrint("Failure IoDeleteSymbolicLink\n");
-	}
-
-	if (pdx->NextStackDevice)
-	{
-		IoDetachDevice(pdx->NextStackDevice);
-		pdx->NextStackDevice = nullptr;
-	}
-
-	if (pdx->fdo) {
-		IoDeleteDevice(pdx->fdo);
-		pdx->fdo = nullptr;
-	}
-
-	gDeviceCountLocker.Lock();
-	gbDeviceNumber[devCounter] = FALSE;		
-	gDeviceCountLocker.UnLock();
-
-	return status;
-}
-
-NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	DbgPrint("HandleStopDevice\n");
-	WINPCILogger("HandleStopDevice\n");
-
-	NTSTATUS status;
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
 	if (pdx->bInterruptEnable) {
@@ -796,7 +693,61 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
 		pdx->dmaAdapter = nullptr;
 	}
-	
+
+}
+
+
+NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
+{
+	NTSTATUS status;
+	DbgPrint("HandleRemoveDevice\n");
+	WINPCILogger("HandleRemoveDevice\n");
+
+	releaseResource(pdx);
+
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	status = DefaultPnpHandler(pdx, Irp);      
+
+	int devCounter = pdx->DeviceCounter;
+	wchar_t  symLinkNameReal[64] = { 0 };
+	UNICODE_STRING symLinkName;
+
+	swprintf(symLinkNameReal, L"%s%d", DEVICE_SYMLINKNAME, devCounter);
+	RtlInitUnicodeString(&symLinkName, symLinkNameReal);
+
+	status = IoDeleteSymbolicLink(&symLinkName);
+
+	if (NT_SUCCESS(status)) {
+		DbgPrint("Success IoDeleteSymbolicLink\n");
+	}
+	else {
+		DbgPrint("Failure IoDeleteSymbolicLink\n");
+	}
+
+	if (pdx->NextStackDevice)
+	{
+		IoDetachDevice(pdx->NextStackDevice);
+		pdx->NextStackDevice = nullptr;
+	}
+
+	if (pdx->fdo) {
+		IoDeleteDevice(pdx->fdo);
+		pdx->fdo = nullptr;
+	}
+
+	gDeviceCountLocker.Lock();
+	gbDeviceNumber[devCounter] = FALSE;		
+	gDeviceCountLocker.UnLock();
+
+	return status;
+}
+
+NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	DbgPrint("HandleStopDevice\n");
+	WINPCILogger("HandleStopDevice\n");
+
+	releaseResource(pdx);
+
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return DefaultPnpHandler(pdx, Irp);      
 
@@ -1106,7 +1057,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		case IOCTL_WINPCI_UNMAP_MEMORY:
 
 			//DbgPrint("IOCTL_WINPCI_UNMAP\n");
-			if (dwInBufLen == sizeof(WINPCI))
+			if (dwInBufLen == sizeof(WINPCI) && dwOutBufLen == 0)
 			{
 				PMAPINFO pMapInfo;
 				PLIST_ENTRY pLink;
@@ -1259,7 +1210,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		case IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY:
 			DbgPrint("Enter  IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY\n");
 
-			if (dwInBufLen == sizeof(WINPCI))
+			if (dwInBufLen == sizeof(WINPCI) && dwOutBufLen == 0)
 			{
 				PMEMORY pDmaMapInfo;
 				PLIST_ENTRY pLink = pdx->winpci_dma_linkListHead.Flink;
@@ -1305,70 +1256,88 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			break;
 
 		case IOCTL_WINPCI_GET_BDF:
-			BDF   bdf;
-			bdf.bus = pdx->bus;
-			bdf.dev = pdx->dev;
-			bdf.func = pdx->func;
-
-			RtlCopyMemory(pSysBuf, &bdf, sizeof(BDF));
-
-			irp->IoStatus.Information = sizeof(BDF);
-		
+			if (dwInBufLen == 0 && dwOutBufLen == sizeof(BDF)) {
+				BDF   bdf;
+				bdf.bus = pdx->bus;
+				bdf.dev = pdx->dev;
+				bdf.func = pdx->func;
+				RtlCopyMemory(pSysBuf, &bdf, sizeof(BDF));
+				irp->IoStatus.Information = sizeof(BDF);
+			}
+			else {
+				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;			
+			}
+	
 			break;
 
 		case IOCTL_WINPCI_CREATE_EVENT:
-			PIO_INTERRUPT_MESSAGE_INFO p;
-			p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
+			if (dwInBufLen == 0 && dwOutBufLen ==0) {
+				PIO_INTERRUPT_MESSAGE_INFO p;
+				p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
 
-			for (int i = 0; i < (int)p->MessageCount; ++i) {
-				if (i == MAX_EVENT_SZ)break;
-				
-				UNICODE_STRING name;
-				UNICODE_STRING eventbase;
-				UNICODE_STRING eventname;
-				STRING eventnameString;
+				for (int i = 0; i < (int)p->MessageCount; ++i) {
+					if (i == MAX_EVENT_SZ)break;
 
-				char cEventName[EVENTNAMEMAXLEN] = { 0 };
+					UNICODE_STRING name;
+					UNICODE_STRING eventbase;
+					UNICODE_STRING eventname;
+					STRING eventnameString;
 
-				sprintf(cEventName, "Device%dEvent%d", pdx->DeviceCounter, i);
+					char cEventName[EVENTNAMEMAXLEN] = { 0 };
 
-				RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
+					sprintf(cEventName, "Device%dEvent%d", pdx->DeviceCounter, i);
 
-				name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
-				name.Length = 0;
-				name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
-				RtlZeroMemory(name.Buffer, name.MaximumLength);
+					RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
 
-				RtlInitString(&eventnameString, cEventName);
-				RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
+					name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
+					name.Length = 0;
+					name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
+					RtlZeroMemory(name.Buffer, name.MaximumLength);
 
-				RtlCopyUnicodeString(&name, &eventbase);
-				RtlAppendUnicodeStringToString(&name, &eventname);
-				RtlFreeUnicodeString(&eventname);
+					RtlInitString(&eventnameString, cEventName);
+					RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
 
-				pdx->pEvent[i] = IoCreateNotificationEvent(&name, &pdx->eventHandle[i]);
+					RtlCopyUnicodeString(&name, &eventbase);
+					RtlAppendUnicodeStringToString(&name, &eventname);
+					RtlFreeUnicodeString(&eventname);
 
-				ExFreePool(name.Buffer);
+					pdx->pEvent[i] = IoCreateNotificationEvent(&name, &pdx->eventHandle[i]);
 
-				if (!pdx->pEvent[i]) {
-					for (int j = 0; j < i - 1; ++j) {
-						ZwClose(pdx->eventHandle[j]);
-						pdx->eventHandle[j] = nullptr;
+					ExFreePool(name.Buffer);
+
+					if (!pdx->pEvent[i]) {
+						for (int j = 0; j < i - 1; ++j) {
+							ZwClose(pdx->eventHandle[j]);
+							pdx->eventHandle[j] = nullptr;
+						}
+						WINPCILogger("Failure IoCreateNotificationEvent\n");
+						irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+						break;
 					}
-					WINPCILogger("Failure IoCreateNotificationEvent\n");
-					irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
-					break;
+					KeClearEvent(pdx->pEvent[i]);
 				}
-				KeClearEvent(pdx->pEvent[i]);
+				irp->IoStatus.Information = (int)p->MessageCount;
+			
 			}
+			else {
+				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+			}
+		
 			break;
 		case IOCTL_WINPCI_DELETE_EVENT:
-			for (int i = 0; i < MAX_EVENT_SZ; ++i) {
-				if (pdx->eventHandle[i]) {
-					ZwClose(pdx->eventHandle[i]);
-					pdx->eventHandle[i] = nullptr;
+
+			if (dwInBufLen == 0 && dwOutBufLen == 0) {
+				for (int i = 0; i < MAX_EVENT_SZ; ++i) {
+					if (pdx->eventHandle[i]) {
+						ZwClose(pdx->eventHandle[i]);
+						pdx->eventHandle[i] = nullptr;
+					}
 				}
 			}
+			else {
+				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+			}
+			
 			break;
 		default:
 			break;
