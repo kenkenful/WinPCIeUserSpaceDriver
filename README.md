@@ -23,7 +23,12 @@ Example for NVMe.
   ```
   devcon.exe update winpci.inf "PCI\CC_010802"
   ```
-- Uninstall Driver
+  or
+  ```
+  devcon.exe update winpci.inf "Hardware ID"
+   #HWID can be checked from Device Manager.
+  ```
+- UnInstall Driver
   ```
   devcon.exe remove "PCI\CC_010802"
   ```
