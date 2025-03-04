@@ -11,15 +11,14 @@
 #define DEVICE_NAME					( L"\\Device\\WINPCI" )
 #define DEVICE_SYMLINKNAME	( L"\\DosDevices\\WINPCI" )
 
-
 const int  EVENTNAMEMAXLEN = 100;
 const int BUFFER_SIZE = 256;
 const int MAX_DEVICE_COUNT = 100;
 bool gbDeviceNumber[MAX_DEVICE_COUNT] = { FALSE };
 FastMutex	gDeviceCountLocker;
-//LONG gucDeviceCounter;
 
 //Mapped memory information list
+#if 0
 typedef struct tagMAPINFO
 {
 	LIST_ENTRY	ListEntry;
@@ -27,15 +26,18 @@ typedef struct tagMAPINFO
 	PVOID				pvk;				//kernel mode virtual address
 	PVOID				pvu;				//user mode virtual address
 	ULONG			memSize;	//memory size in bytes
+	LONG				index;
 } MAPINFO, * PMAPINFO;
+#endif
 
 typedef struct _MEMORY {
 	LIST_ENTRY					ListEntry;
-	ULONG							Length;
-	PHYSICAL_ADDRESS	   dmaAddr;
+	PMDL								pMdl;
 	PVOID								pvk;
 	PVOID								pvu;
-	PMDL								pMdl;
+	ULONG							dwSize;
+	PHYSICAL_ADDRESS	   dmaAddr;
+	LONG								index;
 }MEMORY, * PMEMORY;
 
 typedef struct _DEVICE_EXTENSION
@@ -62,6 +64,7 @@ typedef struct _DEVICE_EXTENSION
 	ULONG						    bus;
 	USHORT						    dev;
 	USHORT						    func;
+	LONG								controlCount;
 } DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
 VOID WINPCILogger(char* text);
@@ -187,7 +190,6 @@ NTSTATUS WINPCIAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Physi
 		if (gbDeviceNumber[i] == FALSE) {
 			devCounter = i;
 			gbDeviceNumber[i] = TRUE;
-			break;
 			break;
 		}
 	}
@@ -554,7 +556,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	DeviceDescription.InterfaceType = PCIBus;
 	DeviceDescription.MaximumLength =  0x10000000;
 
-
 	if(pdx->dmaAdapter == nullptr)
 		pdx-> dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &pdx ->NumOfMappedRegister);
 
@@ -653,7 +654,7 @@ void releaseResource(PDEVICE_EXTENSION pdx) {
 		IoFreeMdl(pDmaMem->pMdl);
 		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
 			pdx->dmaAdapter,
-			pDmaMem->Length,
+			pDmaMem->dwSize,
 			pDmaMem->dmaAddr,
 			pDmaMem->pvk,
 			FALSE
@@ -668,12 +669,12 @@ void releaseResource(PDEVICE_EXTENSION pdx) {
 	{
 		DbgPrint("%s: IOCTL_WINPCI_UNMAP_MEMORY\n", __func__);
 		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winpci_mmap_linkListHead);
-		PMAPINFO pMapInfo = CONTAINING_RECORD(pEntry, MAPINFO, ListEntry);
+		PMEMORY pMapInfo = CONTAINING_RECORD(pEntry, MEMORY, ListEntry);
 		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
 
 		MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
 		IoFreeMdl(pMapInfo->pMdl);
-		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
+		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->dwSize);
 
 		ExFreePool(pMapInfo);
 
@@ -745,7 +746,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	DbgPrint("HandleStopDevice\n");
 	WINPCILogger("HandleStopDevice\n");
-
+	
 	releaseResource(pdx);
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -1002,7 +1003,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 					PMDL pMdl = IoAllocateMdl(pvk, pMem->dwSize, FALSE, FALSE, NULL);
 					if (pMdl)
 					{
-						PMAPINFO pMapInfo;
+						PMEMORY pMapInfo;
 
 						//build mdl and map to user space
 						MmBuildMdlForNonPagedPool(pMdl);
@@ -1010,12 +1011,15 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 						pvu = MmMapLockedPagesSpecifyCache(pMdl, UserMode, MmNonCached, NULL, FALSE, NormalPagePriority);
 
 						if (pvu) {
+							InterlockedIncrement(&pdx->controlCount);
+
 							//insert mapped infomation to list
-							pMapInfo = (PMAPINFO)ExAllocatePool(NonPagedPool, sizeof(MAPINFO));
+							pMapInfo = (PMEMORY)ExAllocatePool(NonPagedPool, sizeof(MEMORY));
 							pMapInfo->pMdl = pMdl;
 							pMapInfo->pvk = pvk;
 							pMapInfo->pvu = pvu;
-							pMapInfo->memSize = pMem->dwSize;
+							pMapInfo->dwSize = pMem->dwSize;
+							pMapInfo->index = pdx->controlCount;
 
 							pdx->winpci_mmap_locker.Lock();
 							InsertHeadList(&pdx->winpci_mmap_linkListHead, &pMapInfo->ListEntry);
@@ -1025,6 +1029,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							mem.phyAddr = (PVOID)phyAddr.QuadPart;
 							mem.pvu = pvu;
 							mem.dwSize = pMem->dwSize;
+							mem.index = pdx->controlCount;
 
 							RtlCopyMemory(pSysBuf, &mem, sizeof(WINPCI));
 
@@ -1059,38 +1064,27 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			//DbgPrint("IOCTL_WINPCI_UNMAP\n");
 			if (dwInBufLen == sizeof(WINPCI) && dwOutBufLen == 0)
 			{
-				PMAPINFO pMapInfo;
-				PLIST_ENTRY pLink;
+				PMEMORY pMapInfo;
+				bool find = false;
 
-				//initialize to head
-				pLink = pdx->winpci_mmap_linkListHead.Flink;
+				for (PLIST_ENTRY pLink = pdx->winpci_mmap_linkListHead.Flink; &pdx->winpci_mmap_linkListHead != pLink; pLink = pLink-> Flink) {
+					pMapInfo = CONTAINING_RECORD(pLink, MEMORY, ListEntry);
+					if (pMapInfo->index == pMem->index && pMapInfo->pvu == pMem->pvu && pMapInfo->dwSize == pMem->dwSize) {
+						//free mdl, unmap mapped memory
+						MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
+						IoFreeMdl(pMapInfo->pMdl);
+						MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->dwSize);
 
-				while (pLink)
-				{
-					pMapInfo = CONTAINING_RECORD(pLink, MAPINFO, ListEntry);
+						pdx->winpci_mmap_locker.Lock();
+						RemoveEntryList(&pMapInfo->ListEntry);
+						pdx->winpci_mmap_locker.UnLock();
 
-					if (pMapInfo->pvu == pMem->pvu)
-					{
-						if (pMapInfo->memSize == pMem->dwSize)
-						{
-							//free mdl, unmap mapped memory
-							MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
-							IoFreeMdl(pMapInfo->pMdl);
-							MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
-
-							pdx->winpci_mmap_locker.Lock();
-							RemoveEntryList(&pMapInfo->ListEntry);
-							pdx->winpci_mmap_locker.UnLock();
-
-							ExFreePool(pMapInfo);
-						}
-						else {
-							irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-						}
+						ExFreePool(pMapInfo);
+						find = true;
 						break;
 					}
-					pLink = pLink->Flink;
 				}
+				if (find == false) irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
 			}
 			else{
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
@@ -1145,14 +1139,17 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 						pvu = MmMapLockedPagesSpecifyCache(pMdl, UserMode, MmNonCached, NULL, FALSE, NormalPagePriority);
 
 						if (pvu) {
+							InterlockedIncrement(&pdx->controlCount);
+
 							//insert mapped infomation to list
 							pDmaMapInfo = (PMEMORY)ExAllocatePool(NonPagedPool, sizeof(MEMORY));
 							pDmaMapInfo->pMdl = pMdl;
 							pDmaMapInfo->pvk = pvk;
 							pDmaMapInfo->pvu = pvu;
+							pDmaMapInfo->index = pdx->controlCount;
 						
 							pDmaMapInfo->dmaAddr.QuadPart = phyAddr.QuadPart;
-							pDmaMapInfo->Length = pMem->dwSize;
+							pDmaMapInfo->dwSize = pMem->dwSize;
 
 							pdx->winpci_dma_locker.Lock();
 							InsertHeadList(&pdx->winpci_dma_linkListHead, &pDmaMapInfo->ListEntry);
@@ -1164,6 +1161,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							mem.phyAddr = (PVOID)phyAddr.QuadPart;
 							mem.pvu = pvu;
 							mem.dwSize = pMem->dwSize;
+							mem.index = pdx->controlCount;
 
 							RtlCopyMemory(pSysBuf, &mem, sizeof(WINPCI));
 
@@ -1213,42 +1211,37 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			if (dwInBufLen == sizeof(WINPCI) && dwOutBufLen == 0)
 			{
 				PMEMORY pDmaMapInfo;
-				PLIST_ENTRY pLink = pdx->winpci_dma_linkListHead.Flink;
+				bool find = false;
 
-				while (pLink)
-				{
+				for (PLIST_ENTRY pLink = pdx->winpci_dma_linkListHead.Flink; &pdx->winpci_dma_linkListHead != pLink;  pLink = pLink->Flink) {
+
 					pDmaMapInfo = CONTAINING_RECORD(pLink, MEMORY, ListEntry);
+					if (pDmaMapInfo->index == pMem->index && pDmaMapInfo->pvu == pMem->pvu && pDmaMapInfo->dwSize == pMem->dwSize) {
+						//free mdl, unmap mapped memory                                                           
+						MmUnmapLockedPages(pDmaMapInfo->pvu, pDmaMapInfo->pMdl);
+						IoFreeMdl(pDmaMapInfo->pMdl);
 
-					if (pDmaMapInfo->pvu == pMem->pvu)
-					{
-						if (pDmaMapInfo->Length == pMem->dwSize)
-						{
-							//free mdl, unmap mapped memory
-							MmUnmapLockedPages(pDmaMapInfo->pvu, pDmaMapInfo->pMdl);
-							IoFreeMdl(pDmaMapInfo->pMdl);
+						pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+							pdx->dmaAdapter,
+							pDmaMapInfo->dwSize,
+							pDmaMapInfo->dmaAddr,
+							pDmaMapInfo->pvk,
+							FALSE
+						);
 
-							pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-								pdx->dmaAdapter,
-								pDmaMapInfo->Length,
-								pDmaMapInfo->dmaAddr,
-								pDmaMapInfo->pvk,
-								FALSE
-							);
+						pdx->winpci_dma_locker.Lock();
+						RemoveEntryList(&pDmaMapInfo->ListEntry);
+						pdx->winpci_dma_locker.UnLock();
 
-							pdx->winpci_dma_locker.Lock();
-							RemoveEntryList(&pDmaMapInfo->ListEntry);
-							pdx->winpci_dma_locker.UnLock();
+						ExFreePool(pDmaMapInfo);
 
-							ExFreePool(pDmaMapInfo);
-							DbgPrint("Leave IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY\n");
-						}
-						else {
-							irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-						}
+						find = true;
+						DbgPrint("Leave IOCTL_WINPCI_UNALLOCATE_DMA_MEMORY\n");
 						break;
 					}
-					pLink = pLink->Flink;
 				}
+				if (find == false) irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+
 			}
 			else
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
