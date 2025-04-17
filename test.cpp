@@ -11,11 +11,13 @@ void run(std::unique_ptr<CNVMe> p) {
         if (p->init() == false) break;
         p->initIoQ(cqid, cq_depth, sqid, sq_depth, vector);
 
-        //if (p->identify_ctrl(nullptr, 0) == false) break;
+        p->read(sqid, 1);
+        if (p->identify_ctrl(nullptr, 0) == false) break;
         //p->read(sqid, 1);
-      //  p->deleteIOCQ(cqid);
+        p->deleteIOSQ(sqid);
+        p->deleteIOCQ(cqid);
 
-      // p->deleteIOSQ(sqid);
+    
     } while (0);
 }
 

@@ -351,7 +351,7 @@ bool CNVMe::createIOCQ(int cqid, int qsize, int flags, int vector) {
 	admin_sq_entry[cid].create_cq.cqid = (u64)cqid;
 
 	admin_sq_entry[cid].create_cq.qsize = qsize-1;
-	admin_sq_entry[cid].create_cq.flags =flags;
+	admin_sq_entry[cid].create_cq.cq_flags =flags;
 
 	admin_sq_entry[cid].create_cq.irq_vector = vector;
 
@@ -364,6 +364,7 @@ bool CNVMe::createIOCQ(int cqid, int qsize, int flags, int vector) {
 }
 
 bool CNVMe::deleteIOCQ(int cqid) {
+	std::cout << __func__ << std::endl;
 	int cid = admin_sq_tail;
 	ZeroMemory(&admin_sq_entry[cid], sizeof(nvme_sq_entry_t));
 
@@ -396,7 +397,7 @@ bool CNVMe::createIOSQ(int sqid, int qsize, int flags, int related_cqid) {
 	admin_sq_entry[cid].create_sq.sqid = (u64)sqid;
 
 	admin_sq_entry[cid].create_sq.qsize = qsize - 1;
-	admin_sq_entry[cid].create_sq.flags = flags;
+	admin_sq_entry[cid].create_sq.sq_flags = flags;
 
 	admin_sq_entry[cid].create_sq.cqid = related_cqid;
 
@@ -409,6 +410,7 @@ bool CNVMe::createIOSQ(int sqid, int qsize, int flags, int related_cqid) {
 }
 
 bool CNVMe::deleteIOSQ(int sqid) {
+	std::cout << __func__ << std::endl;
 	int cid = admin_sq_tail;
 	ZeroMemory(&admin_sq_entry[cid], sizeof(nvme_sq_entry_t));
 
