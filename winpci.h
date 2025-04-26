@@ -1,5 +1,7 @@
 #pragma once
 
+const int MAX_EVENT_SZ = 16;
+
 #define	FILE_DEVICE_WINPCI		0x8000
 
 #define	IOCTL_WINPCI_MAP_MEMORY									CTL_CODE(FILE_DEVICE_WINPCI, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -12,13 +14,17 @@
 #define	IOCTL_WINPCI_CREATE_EVENT										CTL_CODE(FILE_DEVICE_WINPCI, 0x805, METHOD_NEITHER, FILE_ANY_ACCESS)
 #define	IOCTL_WINPCI_DELETE_EVENT										CTL_CODE(FILE_DEVICE_WINPCI, 0x806, METHOD_NEITHER, FILE_ANY_ACCESS)
 
+#define	IOCTL_WINPCI_READ_CONFIG										CTL_CODE(FILE_DEVICE_WINPCI, 0x807,METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+#define	IOCTL_WINPCI_WRITE_CONFIG									CTL_CODE(FILE_DEVICE_WINPCI, 0x808, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+
 typedef struct tagWINPCI
 {
 	PVOID phyAddr;			// physical Address for map
 	PVOID pvu;					// user space virtual address for unmap
 	ULONG dwSize;				// memory size to map or unmap
-	ULONG dwRegOff;		// register offset: 0-255
+	ULONG dwRegOff;		// register offset
 	ULONG dwBytes;			// bytes to read or write
+	LONG   index;
 } WINPCI, * PWINPCI;
 
 typedef struct tagBDF {

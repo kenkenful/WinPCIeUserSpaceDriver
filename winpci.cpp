@@ -537,6 +537,8 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	}
 
+	
+
 	/* setting DMA adapter */
 	DEVICE_DESCRIPTION DeviceDescription;
 	RtlZeroMemory(&DeviceDescription, sizeof(DEVICE_DESCRIPTION));
@@ -971,6 +973,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 	irp->IoStatus.Information = 0;
 	irpStack = IoGetCurrentIrpStackLocation(irp);
 
+	PVOID  pValue;
 	PVOID pSysBuf = (PVOID)irp->AssociatedIrp.SystemBuffer;
 	PWINPCI pMem = (PWINPCI)pSysBuf;
 
@@ -1332,6 +1335,35 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			}
 			
 			break;
+
+		case IOCTL_WINPCI_READ_CONFIG:
+			pValue = (PVOID)MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority);
+			if (pValue == nullptr) {
+				irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+				break;
+			}
+			irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 0, pValue, pMem->dwRegOff, pMem->dwBytes);
+			if (NT_SUCCESS(irp->IoStatus.Status)) {
+				//DbgPrint("Success read config\n");
+				irp->IoStatus.Information = pMem->dwBytes;
+			}
+
+			break;
+
+		case IOCTL_WINPCI_WRITE_CONFIG:
+			pValue = (PVOID)MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority);
+			if (pValue == nullptr) {
+				irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+				break;
+			}
+
+			irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 1, pValue, pMem->dwRegOff, pMem->dwBytes);
+			if (NT_SUCCESS(irp->IoStatus.Status)) {
+				//DbgPrint("Success write config\n");
+				irp->IoStatus.Information = pMem->dwBytes;
+			}
+			break;
+
 		default:
 			break;
 		}
