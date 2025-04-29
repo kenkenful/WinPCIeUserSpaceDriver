@@ -17,18 +17,26 @@ const int MAX_DEVICE_COUNT = 100;
 bool gbDeviceNumber[MAX_DEVICE_COUNT] = { FALSE };
 FastMutex	gDeviceCountLocker;
 
-//Mapped memory information list
-#if 0
-typedef struct tagMAPINFO
-{
-	LIST_ENTRY	ListEntry;
-	PMDL				pMdl;			//allocated mdl
-	PVOID				pvk;				//kernel mode virtual address
-	PVOID				pvu;				//user mode virtual address
-	ULONG			memSize;	//memory size in bytes
-	LONG				index;
-} MAPINFO, * PMAPINFO;
-#endif
+extern "C" NTSYSAPI NTSTATUS NTAPI ObReferenceObjectByName(
+	_In_ PUNICODE_STRING ObjectPath,
+	_In_ ULONG Attributes,
+	_In_opt_ PACCESS_STATE PassedAccessState,
+	_In_opt_ ACCESS_MASK DesiredAccess,
+	_In_ POBJECT_TYPE ObjectType,
+	_In_ KPROCESSOR_MODE AccessMode,
+	_Inout_opt_ PVOID ParseContext,
+	_Out_ PVOID * Object
+);
+
+extern "C" POBJECT_TYPE * IoDriverObjectType;
+
+extern "C" NTSTATUS
+IoEnumerateDeviceObjectList(
+	IN PDRIVER_OBJECT  DriverObject,
+	IN PDEVICE_OBJECT * DeviceObjectList,
+	IN ULONG  DeviceObjectListSize,
+	OUT PULONG  ActualNumberDeviceObjects
+);
 
 typedef struct _MEMORY {
 	LIST_ENTRY					ListEntry;
@@ -1342,7 +1350,10 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 				irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
 				break;
 			}
-			irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 0, pValue, pMem->dwRegOff, pMem->dwBytes);
+
+			irp->IoStatus.Status = ReadWriteConfigSpace(pdx->PhyDevice, 0, pValue, pMem->dwRegOff, pMem->dwBytes);
+			//irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 0, pValue, pMem->dwRegOff, pMem->dwBytes);
+			
 			if (NT_SUCCESS(irp->IoStatus.Status)) {
 				//DbgPrint("Success read config\n");
 				irp->IoStatus.Information = pMem->dwBytes;
@@ -1357,11 +1368,99 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 				break;
 			}
 
-			irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 1, pValue, pMem->dwRegOff, pMem->dwBytes);
+			irp->IoStatus.Status = ReadWriteConfigSpace(pdx->PhyDevice, 1, pValue, pMem->dwRegOff, pMem->dwBytes);
+			//irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 1, pValue, pMem->dwRegOff, pMem->dwBytes);
+
 			if (NT_SUCCESS(irp->IoStatus.Status)) {
 				//DbgPrint("Success write config\n");
 				irp->IoStatus.Information = pMem->dwBytes;
 			}
+			break;
+
+		case IOCTL_WINMEM_GETOBJ:
+			UNICODE_STRING name;
+			RtlInitUnicodeString(&name, L"\\driver\\pci");
+			PDRIVER_OBJECT driver;
+			ULONG actualCount;
+			PDEVICE_OBJECT* m_ppDevices;
+			ULONG propertyAddress, BusNumber;
+			USHORT FunctionNumber, DeviceNumber;
+			ULONG  length;
+			NTSTATUS ntStatus;
+
+			ntStatus = ObReferenceObjectByName(&name, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, nullptr, 0, *IoDriverObjectType, KernelMode, nullptr, (PVOID*)&driver);
+
+			if (!NT_SUCCESS(ntStatus)) {
+				DbgPrint("Failure  ObReferenceObjectByName\n");
+				break;
+			}
+			else {
+				DbgPrint("Success   ObReferenceObjectByName\n");
+			}
+
+			ntStatus = IoEnumerateDeviceObjectList(driver, NULL, 0, &actualCount);
+
+			DbgPrint("Success IoEnumerateDeviceObjectList :%d \n", actualCount);
+
+			m_ppDevices = (PDEVICE_OBJECT*)ExAllocatePool(NonPagedPool, sizeof(PDEVICE_OBJECT) * actualCount);
+
+			ntStatus = IoEnumerateDeviceObjectList(driver, m_ppDevices, actualCount * sizeof(PDEVICE_OBJECT), &actualCount);
+			if (NT_SUCCESS(ntStatus)) {
+				DbgPrint("Success IoEnumerateDeviceObjectList \n");
+
+				for (size_t i = 0; i < actualCount; i++) {
+					ntStatus = IoGetDeviceProperty(m_ppDevices[i],
+						DevicePropertyBusNumber,
+						sizeof(ULONG),
+						(PVOID)&BusNumber,
+						&length);
+
+					if (NT_SUCCESS(ntStatus)) {
+						DbgPrint("BusNumber:%x\n", BusNumber);
+
+						ntStatus = IoGetDeviceProperty(m_ppDevices[i],
+							DevicePropertyAddress,
+							sizeof(ULONG),
+							(PVOID)&propertyAddress,
+							&length);
+
+						if (NT_SUCCESS(ntStatus)) {
+							FunctionNumber = (USHORT)((propertyAddress) & 0x0000FFFF);
+							DeviceNumber = (USHORT)(((propertyAddress) >> 16) & 0x0000FFFF);
+							DbgPrint("DeviceNumber:%x\n", DeviceNumber);
+							DbgPrint("FunctionNumber:%x\n", FunctionNumber);
+
+							//if (BusNumber == pPci->dwBusNum && DeviceNumber == pPci->dwDevNum && FunctionNumber == pPci->dwFuncNum) {
+							//	PCI_COMMON_CONFIG pci_config;
+							//	auto status = ReadWriteConfigSpace(m_ppDevices[i], 0, &pci_config, 0, sizeof(PCI_COMMON_CONFIG));
+							//	if (NT_SUCCESS(status))
+							//	{
+							//		DbgPrint("======================PCI_COMMON_CONFIG Begin=====================\n");
+							//		DbgPrint("VendorID:%x\n", pci_config.VendorID);
+							//		DbgPrint("DeviceID:%x\n", pci_config.DeviceID);
+							//		DbgPrint("CapabilitiesPtr: %x\n", pci_config.u.type0.CapabilitiesPtr);
+							//	}
+							//	break;
+							//}
+
+						}
+						else
+							DbgPrint("Failure IoGetDeviceProperty\n");
+
+					}
+					else
+						DbgPrint("Failure IoGetDeviceProperty\n");
+
+				}
+			}
+
+			for (size_t i = 0; i < actualCount; i++) ObDereferenceObject(m_ppDevices[i]);
+
+			ExFreePool(m_ppDevices);
+
+			ObDereferenceObject(driver);
+
+
 			break;
 
 		default:
