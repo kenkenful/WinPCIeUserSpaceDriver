@@ -52,6 +52,7 @@ typedef struct _DEVICE_EXTENSION
 {
 	PDEVICE_OBJECT		   fdo;
 	PDEVICE_OBJECT		   PhyDevice;
+	PDEVICE_OBJECT			SecondaryBus_PhyDevice;
 	PDEVICE_OBJECT		   NextStackDevice;
 	UNICODE_STRING	   ustrDeviceName;
 	UNICODE_STRING	   ustrSymLinkName;
@@ -1377,7 +1378,7 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			}
 			break;
 
-		case IOCTL_WINMEM_GETOBJ:
+		case IOCTL_WINPCI_GET_SBOBJ:
 			UNICODE_STRING name;
 			RtlInitUnicodeString(&name, L"\\driver\\pci");
 			PDRIVER_OBJECT driver;
@@ -1404,11 +1405,11 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 
 			m_ppDevices = (PDEVICE_OBJECT*)ExAllocatePool(NonPagedPool, sizeof(PDEVICE_OBJECT) * actualCount);
 
-			ntStatus = IoEnumerateDeviceObjectList(driver, m_ppDevices, actualCount * sizeof(PDEVICE_OBJECT), &actualCount);
+			ntStatus = IoEnumerateDeviceObjectList(driver, m_ppDevices,  sizeof(PDEVICE_OBJECT) * actualCount, &actualCount);
 			if (NT_SUCCESS(ntStatus)) {
 				DbgPrint("Success IoEnumerateDeviceObjectList \n");
 
-				for (size_t i = 0; i < actualCount; i++) {
+				for (size_t i = 0; i < actualCount; ++i) {
 					ntStatus = IoGetDeviceProperty(m_ppDevices[i],
 						DevicePropertyBusNumber,
 						sizeof(ULONG),
@@ -1430,18 +1431,10 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							DbgPrint("DeviceNumber:%x\n", DeviceNumber);
 							DbgPrint("FunctionNumber:%x\n", FunctionNumber);
 
-							//if (BusNumber == pPci->dwBusNum && DeviceNumber == pPci->dwDevNum && FunctionNumber == pPci->dwFuncNum) {
-							//	PCI_COMMON_CONFIG pci_config;
-							//	auto status = ReadWriteConfigSpace(m_ppDevices[i], 0, &pci_config, 0, sizeof(PCI_COMMON_CONFIG));
-							//	if (NT_SUCCESS(status))
-							//	{
-							//		DbgPrint("======================PCI_COMMON_CONFIG Begin=====================\n");
-							//		DbgPrint("VendorID:%x\n", pci_config.VendorID);
-							//		DbgPrint("DeviceID:%x\n", pci_config.DeviceID);
-							//		DbgPrint("CapabilitiesPtr: %x\n", pci_config.u.type0.CapabilitiesPtr);
-							//	}
-							//	break;
-							//}
+							if (BusNumber == pMem->bus && DeviceNumber == pMem->dev && FunctionNumber == pMem->func) {
+								pdx ->SecondaryBus_PhyDevice = m_ppDevices[i];
+								break;
+							}
 
 						}
 						else
@@ -1460,7 +1453,39 @@ NTSTATUS WINPCIDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 
 			ObDereferenceObject(driver);
 
+			break;
 
+		case IOCTL_WINPCI_READ_CONFIG_SB:
+			pValue = (PVOID)MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority);
+			if (pValue == nullptr) {
+				irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+				break;
+			}
+
+			irp->IoStatus.Status = ReadWriteConfigSpace(pdx->SecondaryBus_PhyDevice, 0, pValue, pMem->dwRegOff, pMem->dwBytes);
+			//irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 0, pValue, pMem->dwRegOff, pMem->dwBytes);
+
+			if (NT_SUCCESS(irp->IoStatus.Status)) {
+				//DbgPrint("Success read config\n");
+				irp->IoStatus.Information = pMem->dwBytes;
+			}
+
+			break;
+
+		case IOCTL_WINPCI_WRITE_CONFIG_SB:
+			pValue = (PVOID)MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority);
+			if (pValue == nullptr) {
+				irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+				break;
+			}
+
+			irp->IoStatus.Status = ReadWriteConfigSpace(pdx->SecondaryBus_PhyDevice, 1, pValue, pMem->dwRegOff, pMem->dwBytes);
+			//irp->IoStatus.Status = ReadWriteConfigSpace(fdo, 1, pValue, pMem->dwRegOff, pMem->dwBytes);
+
+			if (NT_SUCCESS(irp->IoStatus.Status)) {
+				//DbgPrint("Success write config\n");
+				irp->IoStatus.Information = pMem->dwBytes;
+			}
 			break;
 
 		default:
