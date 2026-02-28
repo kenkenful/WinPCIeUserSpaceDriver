@@ -44,7 +44,13 @@ Example for NVMe.
   ```
   devcon.exe rescan
   ```
-  
+
+###  Driver force UnInstall
+``` 
+pnputil /enum-drivers
+pnputil /delete-driver oemNN.inf /uninstall /force
+```
+
 ### How to create application
 This driver does not initialize the device, so the application must do so.  
 Map the PCI Config register and device registers to User Space, set the registers appropriately, and initialize the device. 
