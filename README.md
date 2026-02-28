@@ -47,7 +47,7 @@ Example for NVMe.
 
 ###  Driver force UnInstall
 ``` 
-pnputil /enum-drivers
+pnputil /enum-drivers | Select-String "winpci.inf" -Context 5
 pnputil /delete-driver oemNN.inf /uninstall /force
 ```
 
